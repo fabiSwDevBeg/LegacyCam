@@ -50,7 +50,7 @@ ssh iphone4
 dpkg -i /var/root/*.deb
 
 If app not appears on home screen:
-su mobile
+su - mobile
 uicache -a
 
 If needed:
