@@ -1,0 +1,28 @@
+# Theos build output
+.theos/
+packages/
+obj/
+*.deb
+
+# macOS junk
+.DS_Store
+
+# Xcode / IDE
+build/
+DerivedData/
+*.xcworkspace
+*.xcodeproj/xcuserdata/
+
+# logs
+*.log
+
+# temporary files
+*.swp
+*.lock
+
+# SSH / keys
+*.pem
+*.key
+
+# backup files
+*~
