@@ -1,5 +1,8 @@
 #import "HTTPServer.h"
 #import "FlashManager.h"
+#import "LCConfigManager.h"
+#import "LCRoutes.h"
+#import "LCStatusManager.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <unistd.h>
@@ -10,6 +13,10 @@
 
 - (void)start {
     signal(SIGPIPE, SIG_IGN);
+
+    if (!self.statusManager) {
+        self.statusManager = [[LCStatusManager alloc] init];
+    }
     
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -18,7 +25,7 @@
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(8080);
+    addr.sin_port = htons([LCConfigManager sharedManager].port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
@@ -43,43 +50,72 @@
 }
 
 - (void)handleRequest:(int)client {
+    @autoreleasepool {
+        char buffer[1024] = {0};
+        int len = read(client, buffer, sizeof(buffer)-1);
 
-    char buffer[1024] = {0};
-    int len = read(client, buffer, sizeof(buffer)-1);
+        if (len <= 0) {
+            close(client);
+            return;
+        }
 
-    if (len <= 0) {
-        close(client);
-        return;
+        NSString *request = [[NSString alloc] initWithBytes:buffer
+                                                      length:len
+                                                    encoding:NSUTF8StringEncoding];
+        NSString *path = [self pathForRequest:request];
+
+        if ([path isEqualToString:LCRoutePing]) {
+            [self sendJSON:@{@"ok": @YES} client:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteStatus]) {
+            [self sendJSON:[self.statusManager statusDictionaryWithFlashEnabled:[FlashManager isFlashEnabled]]
+                    client:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteFlashStatus]) {
+            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteFlashOn]) {
+            [FlashManager setFlash:YES];
+            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteFlashOff]) {
+            [FlashManager setFlash:NO];
+            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteSnapshot]) {
+            [self sendSnapshot:client];
+            return;
+        }
+
+        if ([path isEqualToString:LCRouteStream]) {
+            [self sendMJPEG:client];
+            return;
+        }
+
+        [self sendDiagnostics:client];
+    }
+}
+
+- (NSString *)pathForRequest:(NSString *)request {
+    NSArray *lines = [request componentsSeparatedByString:@"\r\n"];
+    NSString *requestLine = lines.count > 0 ? lines[0] : @"";
+    NSArray *parts = [requestLine componentsSeparatedByString:@" "];
+
+    if (parts.count < 2) {
+        return @"/";
     }
 
-    NSString *request = [[NSString alloc] initWithBytes:buffer
-                                                  length:len
-                                                encoding:NSUTF8StringEncoding];
-    if ([request rangeOfString:@"/flash/on"].location != NSNotFound) {
-        [FlashManager setFlash:YES];
-    }
-
-    if ([request rangeOfString:@"/flash/off"].location != NSNotFound) {
-        [FlashManager setFlash:NO];
-    }
-
-    if ([request rangeOfString:@"/snapshot.jpg"].location != NSNotFound) {
-        [self sendSnapshot:client];
-        return;
-    }
-
-    if ([request rangeOfString:@"/stream"].location != NSNotFound) {
-        [self sendMJPEG:client];
-        return;
-    }              
-
-    const char *resp =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n\r\n"
-        "LegacyCam OK";
-
-    write(client, resp, strlen(resp));
-    close(client);
+    return parts[1];
 }
 
 - (void)sendMJPEG:(int)client {
@@ -89,35 +125,39 @@
 
     write(client, header.UTF8String, header.length);
 
+    [self.statusManager incrementStreamClients];
+
     while (1) {
+        @autoreleasepool {
+            UIImage *img = self.camera.latestFrame;
 
-        UIImage *img = self.camera.latestFrame;
+            if (!img) {
+                usleep(50000);
+                continue;
+            }
 
-        if (!img) {
-            usleep(50000);
-            continue;
+            NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].streamQuality);
+
+            NSMutableData *chunk = [NSMutableData data];
+
+            NSString *meta = [NSString stringWithFormat:
+                @"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
+                (unsigned long)jpg.length];
+
+            [chunk appendData:[meta dataUsingEncoding:NSUTF8StringEncoding]];
+            [chunk appendData:jpg];
+            [chunk appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+
+            ssize_t w = write(client, chunk.bytes, chunk.length);
+
+            if (w <= 0) {
+                close(client);
+                [self.statusManager decrementStreamClients];
+                break;
+            }
+
+            usleep([LCConfigManager sharedManager].frameIntervalUsec);
         }
-
-        NSData *jpg = UIImageJPEGRepresentation(img, 0.3);
-
-        NSMutableData *chunk = [NSMutableData data];
-
-        NSString *meta = [NSString stringWithFormat:
-            @"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
-            (unsigned long)jpg.length];
-
-        [chunk appendData:[meta dataUsingEncoding:NSUTF8StringEncoding]];
-        [chunk appendData:jpg];
-        [chunk appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-
-        ssize_t w = write(client, chunk.bytes, chunk.length);
-
-        if (w <= 0) {
-            close(client);
-            break;
-        }
-
-        usleep(180000);
     }
 }
 
@@ -133,7 +173,7 @@
         return;
     }
 
-    NSData *jpg = UIImageJPEGRepresentation(img, 0.4);
+    NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].snapshotQuality);
 
     NSString *header = [NSString stringWithFormat:
         @"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
@@ -141,6 +181,42 @@
 
     write(client, header.UTF8String, header.length);
     write(client, jpg.bytes, jpg.length);
+    close(client);
+}
+
+- (void)sendJSON:(NSDictionary *)payload client:(int)client {
+    NSError *error = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&error];
+
+    if (!body || error) {
+        body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
+        (unsigned long)body.length];
+
+    write(client, header.UTF8String, header.length);
+    write(client, body.bytes, body.length);
+    close(client);
+}
+
+- (void)sendDiagnostics:(int)client {
+    NSDictionary *status = [self.statusManager statusDictionaryWithFlashEnabled:[FlashManager isFlashEnabled]];
+    NSString *body = [NSString stringWithFormat:
+        @"<!doctype html><html><head><title>LegacyCam</title></head>"
+        "<body><h1>LegacyCam</h1><pre>%@</pre>"
+        "<p><a href=\"/stream\">stream</a> <a href=\"/snapshot.jpg\">snapshot</a> "
+        "<a href=\"/status\">status</a></p></body></html>",
+        status];
+
+    NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %lu\r\n\r\n",
+        (unsigned long)data.length];
+
+    write(client, header.UTF8String, header.length);
+    write(client, data.bytes, data.length);
     close(client);
 }
 

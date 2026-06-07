@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = LegacyCam
 
-LegacyCam_FILES = main.m LCAppDelegate.m LCRootViewController.m HTTPServer.m LCCameraManager.m FlashManager.m
+LegacyCam_FILES = main.m LCAppDelegate.m LCRootViewController.m HTTPServer.m LCCameraManager.m FlashManager.m LCConfigManager.m LCStatusManager.m LCRoutes.m
 LegacyCam_FRAMEWORKS = UIKit CoreGraphics AVFoundation CoreMedia CoreVideo CoreImage
 LegacyCam_ASSETS = Resources
 LegacyCam_CFLAGS = -fobjc-arc

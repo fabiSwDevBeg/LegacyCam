@@ -1,10 +1,12 @@
 #import "LCCameraManager.h"
+#import "LCConfigManager.h"
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
 
 @implementation LCCameraManager {
     AVCaptureSession *session;
     CIContext *context;
+    NSTimeInterval lastFrameTime;
 }
 
 - (void)start {
@@ -43,6 +45,14 @@
 - (void)captureOutput:(AVCaptureOutput *)output
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    NSTimeInterval frameInterval = [LCConfigManager sharedManager].frameIntervalUsec / 1000000.0;
+
+    if (lastFrameTime > 0 && now - lastFrameTime < frameInterval) {
+        return;
+    }
+
+    lastFrameTime = now;
 
     CVImageBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
 

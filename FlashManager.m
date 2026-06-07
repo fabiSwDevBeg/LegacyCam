@@ -3,6 +3,8 @@
 
 @implementation FlashManager
 
+static BOOL flashEnabled = NO;
+
 + (void)setFlash:(BOOL)on {
 
     AVCaptureDevice *device =
@@ -10,7 +12,11 @@
 
     if ([device hasTorch] && [device isTorchAvailable]) {
 
-        [device lockForConfiguration:nil];
+        NSError *error = nil;
+
+        if (![device lockForConfiguration:&error]) {
+            return;
+        }
 
         if (on) {
             [device setTorchMode:AVCaptureTorchModeOn];
@@ -18,8 +24,14 @@
             [device setTorchMode:AVCaptureTorchModeOff];
         }
 
+        flashEnabled = on;
+
         [device unlockForConfiguration];
     }
+}
+
++ (BOOL)isFlashEnabled {
+    return flashEnabled;
 }
 
 @end

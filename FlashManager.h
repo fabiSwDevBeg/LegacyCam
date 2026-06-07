@@ -3,5 +3,6 @@
 @interface FlashManager : NSObject
 
 + (void)setFlash:(BOOL)on;
++ (BOOL)isFlashEnabled;
 
 @end
