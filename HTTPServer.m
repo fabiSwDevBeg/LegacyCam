@@ -5,6 +5,7 @@
 #import "LCStatusManager.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
+#import <netinet/tcp.h>
 #import <unistd.h>
 
 @implementation HTTPServer {
@@ -92,11 +93,6 @@
             return;
         }
 
-        if ([path isEqualToString:LCRouteSnapshot]) {
-            [self sendSnapshot:client];
-            return;
-        }
-
         if ([path isEqualToString:LCRouteStream]) {
             [self sendMJPEG:client];
             return;
@@ -119,69 +115,73 @@
 }
 
 - (void)sendMJPEG:(int)client {
+    int noDelay = 1;
+    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+
     NSString *header =
     @"HTTP/1.1 200 OK\r\n"
     "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
 
-    write(client, header.UTF8String, header.length);
+    if (![self writeString:header client:client]) {
+        close(client);
+        return;
+    }
 
     [self.statusManager incrementStreamClients];
+    NSUInteger lastSequence = 0;
 
     while (1) {
         @autoreleasepool {
-            UIImage *img = self.camera.latestFrame;
+            NSData *jpg = self.camera.latestJPEG;
+            NSUInteger sequence = self.camera.latestJPEGSequence;
 
-            if (!img) {
-                usleep(50000);
+            if (!jpg || sequence == lastSequence) {
+                usleep(10000);
                 continue;
             }
-
-            NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].streamQuality);
-
-            NSMutableData *chunk = [NSMutableData data];
 
             NSString *meta = [NSString stringWithFormat:
                 @"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
                 (unsigned long)jpg.length];
 
-            [chunk appendData:[meta dataUsingEncoding:NSUTF8StringEncoding]];
-            [chunk appendData:jpg];
-            [chunk appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-
-            ssize_t w = write(client, chunk.bytes, chunk.length);
-
-            if (w <= 0) {
+            if (![self writeString:meta client:client] ||
+                ![self writeData:jpg client:client] ||
+                ![self writeString:@"\r\n" client:client]) {
                 close(client);
                 [self.statusManager decrementStreamClients];
                 break;
             }
 
-            usleep([LCConfigManager sharedManager].frameIntervalUsec);
+            lastSequence = sequence;
         }
     }
 }
 
-- (void)sendSnapshot:(int)client {
+- (BOOL)writeString:(NSString *)string client:(int)client {
+    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    return [self writeData:data client:client];
+}
 
-    UIImage *img = self.camera.latestFrame;
+- (BOOL)writeData:(NSData *)data client:(int)client {
+    return [self writeBytes:data.bytes length:data.length client:client];
+}
 
-    if (!img) {
-        const char *err =
-            "HTTP/1.1 503 Service Unavailable\r\n\r\n";
-        write(client, err, strlen(err));
-        close(client);
-        return;
+- (BOOL)writeBytes:(const void *)bytes length:(NSUInteger)length client:(int)client {
+    const uint8_t *cursor = bytes;
+    NSUInteger remaining = length;
+
+    while (remaining > 0) {
+        ssize_t written = write(client, cursor, remaining);
+
+        if (written <= 0) {
+            return NO;
+        }
+
+        cursor += written;
+        remaining -= written;
     }
 
-    NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].snapshotQuality);
-
-    NSString *header = [NSString stringWithFormat:
-        @"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
-        (unsigned long)jpg.length];
-
-    write(client, header.UTF8String, header.length);
-    write(client, jpg.bytes, jpg.length);
-    close(client);
+    return YES;
 }
 
 - (void)sendJSON:(NSDictionary *)payload client:(int)client {
@@ -206,8 +206,7 @@
     NSString *body = [NSString stringWithFormat:
         @"<!doctype html><html><head><title>LegacyCam</title></head>"
         "<body><h1>LegacyCam</h1><pre>%@</pre>"
-        "<p><a href=\"/stream\">stream</a> <a href=\"/snapshot.jpg\">snapshot</a> "
-        "<a href=\"/status\">status</a></p></body></html>",
+        "<p><a href=\"/stream\">stream</a> <a href=\"/status\">status</a></p></body></html>",
         status];
 
     NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];

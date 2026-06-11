@@ -2,6 +2,7 @@
 #import "HTTPServer.h"
 #import "LCCameraManager.h"
 #import "LCStatusManager.h"
+#import "LCPowerManager.h"
 
 static BOOL LegacyCamShouldExit = NO;
 
@@ -15,6 +16,9 @@ int main(int argc, char *argv[]) {
         signal(SIGTERM, LegacyCamHandleSignal);
         signal(SIGINT, LegacyCamHandleSignal);
         signal(SIGPIPE, SIG_IGN);
+
+        LCPowerManager *powerManager = [[LCPowerManager alloc] init];
+        [powerManager startPreventingIdleSleep];
 
         LCCameraManager *camera = [[LCCameraManager alloc] init];
         [camera start];
@@ -35,6 +39,7 @@ int main(int argc, char *argv[]) {
         }
 
         NSLog(@"[LegacyCam] daemon stopping");
+        [powerManager stopPreventingIdleSleep];
     }
 
     return 0;

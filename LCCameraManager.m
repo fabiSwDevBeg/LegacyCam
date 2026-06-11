@@ -1,5 +1,6 @@
 #import "LCCameraManager.h"
 #import "LCConfigManager.h"
+#import <UIKit/UIKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
 
@@ -28,6 +29,7 @@
 
     AVCaptureVideoDataOutput *output =
         [[AVCaptureVideoDataOutput alloc] init];
+    output.alwaysDiscardsLateVideoFrames = YES;
 
     output.videoSettings = @{
         (NSString *)kCVPixelBufferPixelFormatTypeKey :
@@ -78,6 +80,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CGImageRef cgImage = CGBitmapContextCreateImage(contextRef);
 
     UIImage *img = [UIImage imageWithCGImage:cgImage];
+    NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].streamQuality);
 
     CGImageRelease(cgImage);
     CGContextRelease(contextRef);
@@ -85,7 +88,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
 
-    self.latestFrame = img;
+    if (jpg) {
+        self.latestJPEG = jpg;
+        self.latestJPEGSequence = self.latestJPEGSequence + 1;
+    }
 }
 
 @end

@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = legacycamd
 
-legacycamd_FILES = LegacyCamDaemon.m HTTPServer.m LCCameraManager.m FlashManager.m LCConfigManager.m LCStatusManager.m LCRoutes.m
+legacycamd_FILES = LegacyCamDaemon.m HTTPServer.m LCCameraManager.m FlashManager.m LCConfigManager.m LCStatusManager.m LCRoutes.m LCPowerManager.m
 legacycamd_FRAMEWORKS = Foundation UIKit CoreGraphics AVFoundation CoreMedia CoreVideo CoreImage
 legacycamd_CFLAGS = -fobjc-arc
 

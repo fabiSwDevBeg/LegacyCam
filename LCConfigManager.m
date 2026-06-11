@@ -18,9 +18,8 @@
 
     if (self) {
         _port = 8080;
-        _streamQuality = 0.3;
-        _snapshotQuality = 0.4;
-        _frameIntervalUsec = 180000;
+        _streamQuality = 0.22;
+        _frameIntervalUsec = 66667;
         _version = @"1.0.0";
         _deviceName = @"iPhone4";
     }

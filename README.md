@@ -8,10 +8,11 @@ The backend is organized as a small set of managers around one launchd-managed d
 
 - `legacycamd`: starts camera capture, starts the HTTP server, and stays resident.
 - `HTTPServer`: accepts requests, routes endpoints, writes HTTP responses.
-- `LCCameraManager`: owns the capture session and keeps the latest low-rate frame.
+- `LCCameraManager`: owns the capture session and keeps one compressed latest JPEG shared by every stream client.
 - `FlashManager`: owns torch changes and cached flash state.
 - `LCStatusManager`: tracks uptime and active stream client count.
 - `LCConfigManager`: centralizes port, JPEG quality, frame interval, version, and device label.
+- `LCPowerManager`: asks iOS to avoid idle sleep while streaming.
 - `LCRoutes`: centralizes endpoint paths.
 
 The package installs `/Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist` with `RunAtLoad` and `KeepAlive`, so the service starts at boot and launchd restarts it if it exits.
@@ -28,6 +29,7 @@ LC/
   FlashManager.*
   LCStatusManager.*
   LCConfigManager.*
+  LCPowerManager.*
   LCRoutes.*
   layout/Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist
   layout/DEBIAN/postinst
@@ -40,7 +42,6 @@ If this grows, the same modules can move into `Backend/HTTPServer`, `Backend/Cam
 
 ```text
 GET /stream
-GET /snapshot.jpg
 GET /flash/on
 GET /flash/off
 GET /flash/status
@@ -61,15 +62,16 @@ GET /ping
 }
 ```
 
-The root path returns a simple diagnostics page with links to stream, snapshot, and status.
+The root path returns a simple diagnostics page with links to stream and status.
 
 ## Refactor Plan
 
-1. Keep MJPEG and snapshot generation direct from the latest captured frame.
-2. Keep status generation in memory only.
-3. Avoid frame-level logging and extra image processing.
-4. Centralize tuning in `LCConfigManager`.
-5. Keep Home Assistant availability checks on `/ping` or `/status`, not snapshots.
+1. Compress each MJPEG frame once in `LCCameraManager`.
+2. Share the latest compressed JPEG across all stream clients.
+3. Keep status generation in memory only.
+4. Avoid frame-level logging and extra image processing.
+5. Centralize tuning in `LCConfigManager`.
+6. Keep Home Assistant availability checks on `/ping` or `/status`.
 
 ## Breaking Changes
 
@@ -77,6 +79,8 @@ The root path returns a simple diagnostics page with links to stream, snapshot, 
 - The daemon binary is `/usr/bin/legacycamd`.
 - launchd owns startup and restart through `com.fabiswdevbeg.legacycamd`.
 - Flash endpoints now return JSON instead of plain text.
+- `/snapshot.jpg` was removed to avoid extra JPEG work and keep the backend stream-only.
+- The daemon now prevents idle sleep while running; a manual hardware lock may still stop camera capture on iOS 7.
 - Unknown routes now return the diagnostics page.
 - Home Assistant should use `/status` and `/ping` for state/availability.
 
@@ -110,3 +114,5 @@ launchctl load -w /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist
 tail -f /var/log/legacycamd.log
 tail -f /var/log/legacycamd.err
 ```
+
+For continuous streaming, keep the phone on power and let the daemon prevent auto-lock. Pressing the power button can still force iOS to suspend camera capture.

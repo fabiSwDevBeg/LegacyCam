@@ -1,10 +1,10 @@
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
-#import <UIKit/UIKit.h>
 
 @interface LCCameraManager : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 
-@property (nonatomic, strong) UIImage *latestFrame;
+@property (atomic, strong) NSData *latestJPEG;
+@property (atomic, assign) NSUInteger latestJPEGSequence;
 
 - (void)start;
 
