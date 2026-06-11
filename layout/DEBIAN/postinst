@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+if [ -x /bin/launchctl ]; then
+    /bin/launchctl unload /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist >/dev/null 2>&1 || true
+    /bin/launchctl load -w /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist >/dev/null 2>&1 || true
+fi
+
+exit 0

@@ -2,7 +2,7 @@ Package: com.fabiswdevbeg.legacycam
 Name: LegacyCam
 Version: 1.0.0b
 Architecture: iphoneos-arm
-Description: An awesome application!
+Description: Lightweight LegacyCam MJPEG background daemon for iPhone 4.
 Maintainer: Fabio Iaquinta
 Author: Fabio Iaquinta
 Section: Utilities
