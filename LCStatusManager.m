@@ -1,10 +1,10 @@
 #import "LCStatusManager.h"
 #import "LCConfigManager.h"
-#import <libkern/OSAtomic.h>
+#import <stdatomic.h>
 
 @implementation LCStatusManager {
     NSDate *_startedAt;
-    int32_t _streamClients;
+    atomic_int _streamClients;
 }
 
 - (instancetype)init {
@@ -23,25 +23,32 @@
 }
 
 - (NSInteger)streamClients {
-    return _streamClients;
+    return atomic_load(&_streamClients);
 }
 
 - (void)incrementStreamClients {
-    OSAtomicIncrement32Barrier(&_streamClients);
+    atomic_fetch_add(&_streamClients, 1);
 }
 
 - (void)decrementStreamClients {
-    OSAtomicDecrement32Barrier(&_streamClients);
+    atomic_fetch_sub(&_streamClients, 1);
 }
 
-- (NSDictionary *)statusDictionaryWithFlashEnabled:(BOOL)flashEnabled {
+- (NSDictionary *)statusDictionaryWithFlashEnabled:(BOOL)flashEnabled
+                                    cameraEnabled:(BOOL)cameraEnabled
+                                    cameraRunning:(BOOL)cameraRunning
+                                      cameraError:(NSString *)cameraError {
     LCConfigManager *config = [LCConfigManager sharedManager];
 
     return @{
         @"online": @YES,
         @"flash": @(flashEnabled),
+        @"camera_enabled": @(cameraEnabled),
+        @"camera_running": @(cameraRunning),
+        @"camera_error": cameraError ?: @"",
         @"uptime": @((NSUInteger)self.uptime),
         @"version": config.version,
+        @"build": config.build,
         @"device": config.deviceName,
         @"stream_clients": @(self.streamClients)
     };

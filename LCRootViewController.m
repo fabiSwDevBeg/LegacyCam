@@ -1,58 +1,88 @@
 #import "LCRootViewController.h"
-
-@interface LCRootViewController ()
-@property (nonatomic, strong) NSMutableArray * objects;
-@end
+#import <AVFoundation/AVFoundation.h>
 
 @implementation LCRootViewController
 
-- (void)loadView {
-	[super loadView];
+- (void)viewDidLoad {
+    [super viewDidLoad];
 
-	_objects = [NSMutableArray array];
-
-	self.title = @"Root View Controller";
-	self.navigationItem.leftBarButtonItem = self.editButtonItem;
-	self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addButtonTapped:)];
+    self.title = @"LegacyCam";
 }
 
-- (void)addButtonTapped:(id)sender {
-	[_objects insertObject:[NSDate date] atIndex:0];
-	[self.tableView insertRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:0] ] withRowAnimation:UITableViewRowAnimationAutomatic];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
 }
-
-#pragma mark - Table View Data Source
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-	return 1;
+    return 2;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-	return _objects.count;
+    return section == 0 ? 2 : 1;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section == 0) {
+        return @"Open this app once on iOS 12 and allow camera access, then reload the LegacyCam daemon.";
+    }
+
+    return @"The MJPEG HTTP server is managed by launchd in the background.";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-	static NSString *CellIdentifier = @"Cell";
-	UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:CellIdentifier];
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
 
-	if (!cell) {
-		cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:CellIdentifier];
-	}
+    if (indexPath.section == 0 && indexPath.row == 0) {
+        cell.textLabel.text = @"Camera Permission";
+        cell.detailTextLabel.text = [self cameraPermissionText];
+        return cell;
+    }
 
-	NSDate *date = _objects[indexPath.row];
-	cell.textLabel.text = date.description;
-	return cell;
+    if (indexPath.section == 0 && indexPath.row == 1) {
+        cell.textLabel.text = @"Request Camera Access";
+        cell.textLabel.textColor = self.view.tintColor;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        return cell;
+    }
+
+    cell.textLabel.text = @"Daemon URL";
+    cell.detailTextLabel.text = @"http://device-ip:8080/status";
+    return cell;
 }
-
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
-	[_objects removeObjectAtIndex:indexPath.row];
-	[tableView deleteRowsAtIndexPaths:@[ indexPath ] withRowAnimation:UITableViewRowAnimationAutomatic];
-}
-
-#pragma mark - Table View Delegate
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-	[tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+
+    if (indexPath.section == 0 && indexPath.row == 1) {
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.tableView reloadData];
+            });
+        }];
+    }
+}
+
+- (NSString *)cameraPermissionText {
+    if (![AVCaptureDevice respondsToSelector:@selector(authorizationStatusForMediaType:)]) {
+        return @"Not required";
+    }
+
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+
+    switch (status) {
+        case AVAuthorizationStatusAuthorized:
+            return @"Authorized";
+        case AVAuthorizationStatusDenied:
+            return @"Denied";
+        case AVAuthorizationStatusRestricted:
+            return @"Restricted";
+        case AVAuthorizationStatusNotDetermined:
+            return @"Not Determined";
+    }
+
+    return @"Unknown";
 }
 
 @end

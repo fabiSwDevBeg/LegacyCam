@@ -1,9 +1,11 @@
 #import "HTTPServer.h"
 #import "FlashManager.h"
 #import "LCConfigManager.h"
+#import "LCPreferences.h"
 #import "LCRoutes.h"
 #import "LCStatusManager.h"
 #import <sys/socket.h>
+#import <sys/time.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
 #import <unistd.h>
@@ -30,7 +32,7 @@
     addr.sin_addr.s_addr = INADDR_ANY;
 
     bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
-    listen(server_fd, 5);
+    listen(server_fd, 16);
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         [self loop];
@@ -43,6 +45,8 @@
 
         int client = accept(server_fd, NULL, NULL);
         if (client < 0) continue;
+
+        [self configureClientSocket:client forStream:NO];
 
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             [self handleRequest:client];
@@ -71,35 +75,71 @@
         }
 
         if ([path isEqualToString:LCRouteStatus]) {
-            [self sendJSON:[self.statusManager statusDictionaryWithFlashEnabled:[FlashManager isFlashEnabled]]
-                    client:client];
+            [self sendJSON:[self statusPayload] client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteFlashStatus]) {
-            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            [self sendJSON:@{
+                @"enabled": @([FlashManager isFlashEnabled]),
+                @"available": @([FlashManager isTorchAvailable]),
+                @"error": [FlashManager lastError] ?: @""
+            } client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteFlashOn]) {
             [FlashManager setFlash:YES];
-            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            [self sendJSON:@{
+                @"enabled": @([FlashManager isFlashEnabled]),
+                @"available": @([FlashManager isTorchAvailable]),
+                @"error": [FlashManager lastError] ?: @""
+            } client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteFlashOff]) {
             [FlashManager setFlash:NO];
-            [self sendJSON:@{@"enabled": @([FlashManager isFlashEnabled])} client:client];
+            [self sendJSON:@{
+                @"enabled": @([FlashManager isFlashEnabled]),
+                @"available": @([FlashManager isTorchAvailable]),
+                @"error": [FlashManager lastError] ?: @""
+            } client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteStream]) {
+            if (![LCPreferences isCameraEnabled] || !self.camera.isRunning) {
+                [self sendUnavailable:client];
+                return;
+            }
+
+            if (self.statusManager.streamClients >= [LCConfigManager sharedManager].maxStreamClients) {
+                [self sendTooManyStreams:client];
+                return;
+            }
+
             [self sendMJPEG:client];
             return;
         }
 
         [self sendDiagnostics:client];
     }
+}
+
+- (NSDictionary *)statusPayload {
+    NSMutableDictionary *payload = [[self.statusManager statusDictionaryWithFlashEnabled:[FlashManager isFlashEnabled]
+                                                                           cameraEnabled:[LCPreferences isCameraEnabled]
+                                                                           cameraRunning:self.camera.isRunning
+                                                                             cameraError:self.camera.lastError] mutableCopy];
+
+    payload[@"flash_available"] = @([FlashManager isTorchAvailable]);
+    payload[@"flash_error"] = [FlashManager lastError] ?: @"";
+    payload[@"frame_sequence"] = @(self.camera.latestJPEGSequence);
+    payload[@"latest_jpeg_bytes"] = @(self.camera.latestJPEG.length);
+    payload[@"max_stream_clients"] = @([LCConfigManager sharedManager].maxStreamClients);
+
+    return payload;
 }
 
 - (NSString *)pathForRequest:(NSString *)request {
@@ -115,8 +155,7 @@
 }
 
 - (void)sendMJPEG:(int)client {
-    int noDelay = 1;
-    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+    [self configureClientSocket:client forStream:YES];
 
     NSString *header =
     @"HTTP/1.1 200 OK\r\n"
@@ -136,7 +175,7 @@
             NSUInteger sequence = self.camera.latestJPEGSequence;
 
             if (!jpg || sequence == lastSequence) {
-                usleep(10000);
+                usleep(50000);
                 continue;
             }
 
@@ -155,6 +194,23 @@
             lastSequence = sequence;
         }
     }
+}
+
+- (void)configureClientSocket:(int)client forStream:(BOOL)stream {
+    int noDelay = 1;
+    int keepAlive = 1;
+    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+    setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
+
+    struct timeval receiveTimeout;
+    receiveTimeout.tv_sec = stream ? 5 : 2;
+    receiveTimeout.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, sizeof(receiveTimeout));
+
+    struct timeval sendTimeout;
+    sendTimeout.tv_sec = stream ? 5 : 2;
+    sendTimeout.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
 }
 
 - (BOOL)writeString:(NSString *)string client:(int)client {
@@ -201,8 +257,47 @@
     close(client);
 }
 
+- (void)sendUnavailable:(int)client {
+    NSDictionary *payload = [self statusPayload];
+    NSError *error = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&error];
+
+    if (!body || error) {
+        body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
+        (unsigned long)body.length];
+
+    write(client, header.UTF8String, header.length);
+    write(client, body.bytes, body.length);
+    close(client);
+}
+
+- (void)sendTooManyStreams:(int)client {
+    NSMutableDictionary *payload = [[self statusPayload] mutableCopy];
+    payload[@"error"] = @"too_many_stream_clients";
+    payload[@"max_stream_clients"] = @([LCConfigManager sharedManager].maxStreamClients);
+
+    NSError *error = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&error];
+
+    if (!body || error) {
+        body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
+        (unsigned long)body.length];
+
+    write(client, header.UTF8String, header.length);
+    write(client, body.bytes, body.length);
+    close(client);
+}
+
 - (void)sendDiagnostics:(int)client {
-    NSDictionary *status = [self.statusManager statusDictionaryWithFlashEnabled:[FlashManager isFlashEnabled]];
+    NSDictionary *status = [self statusPayload];
     NSString *body = [NSString stringWithFormat:
         @"<!doctype html><html><head><title>LegacyCam</title></head>"
         "<body><h1>LegacyCam</h1><pre>%@</pre>"

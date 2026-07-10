@@ -2,8 +2,20 @@
 
 set -e
 
+TCC_DB=/var/mobile/Library/TCC/TCC.db
+BUNDLE_ID=com.fabiswdevbeg.legacycam
+SPRINGBOARD_ID=com.apple.springboard
+
 if [ -x /bin/launchctl ]; then
     /bin/launchctl unload /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist >/dev/null 2>&1 || true
+    killall legacycamd >/dev/null 2>&1 || true
+    killall LegacyCam >/dev/null 2>&1 || true
+fi
+
+if [ -x /usr/bin/sqlite3 ] && [ -f "$TCC_DB" ]; then
+    /usr/bin/sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceCamera' AND client='$BUNDLE_ID';" >/dev/null 2>&1 || true
+    /usr/bin/sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceCamera' AND client='$SPRINGBOARD_ID';" >/dev/null 2>&1 || true
+    killall tccd >/dev/null 2>&1 || true
 fi
 
 exit 0

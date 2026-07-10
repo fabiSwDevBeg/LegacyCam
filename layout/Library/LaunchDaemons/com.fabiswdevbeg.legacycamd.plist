@@ -8,7 +8,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/legacycamd</string>
+        <string>/Applications/LegacyCam.app/LegacyCam</string>
+        <string>--daemon</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -24,9 +25,9 @@
     <string>/var/mobile</string>
 
     <key>StandardOutPath</key>
-    <string>/var/log/legacycamd.log</string>
+    <string>/var/mobile/Library/Logs/LegacyCam/legacycamd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/var/log/legacycamd.err</string>
+    <string>/var/mobile/Library/Logs/LegacyCam/legacycamd.err</string>
 </dict>
 </plist>

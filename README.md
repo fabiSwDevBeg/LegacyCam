@@ -1,6 +1,6 @@
-# LegacyCam Backend - iPhone 4 Theos Daemon
+# LegacyCam Backend - Theos Daemon
 
-LegacyCam is a lightweight MJPEG camera daemon for a jailbroken iPhone 4 on iOS 7. It keeps the device workload intentionally small: no transcoding, overlays, motion detection, audio, or per-frame logging.
+LegacyCam is a lightweight MJPEG camera daemon for jailbroken iOS devices. The original target is iPhone 4 on iOS 7, and the Makefile also exposes an arm64 build path for iOS 12. It keeps the device workload intentionally small: no transcoding, overlays, motion detection, audio, or per-frame logging.
 
 ## Architecture Proposal
 
@@ -55,6 +55,9 @@ GET /ping
 {
   "online": true,
   "flash": false,
+  "camera_enabled": true,
+  "camera_running": true,
+  "camera_error": "",
   "uptime": 12345,
   "version": "1.0.0",
   "device": "iPhone4",
@@ -99,20 +102,98 @@ launchctl list | grep legacycam
 
 ## Build
 
+Default build targets iPhone 4 / iOS 7:
+
 ```sh
 make clean
 make package
 ```
 
+Explicit helper targets:
+
+```sh
+make package-ios7
+make package-ios12
+make package-all
+```
+
+Release packages use `FINALPACKAGE=1`:
+
+```sh
+make release-ios7
+make release-ios12
+make release-all
+```
+
+`release-all` builds both release variants and copies them to explicit filenames:
+
+```text
+packages/com.fabiswdevbeg.legacycam_1.0.0_iphoneos-arm_ios7-armv7.deb
+packages/com.fabiswdevbeg.legacycam_1.0.0_iphoneos-arm_ios12-arm64.deb
+```
+
+The iOS 12 helper builds `ARCHS=arm64` with `TARGET=iphone:clang:latest:12.0`, which is correct for iPhone 5s (`iPhone6,1` / `iPhone6,2`) and newer 64-bit iOS 12 devices. If your Theos install has a specific iOS 12 SDK and you prefer pinning it, build manually, for example:
+
+```sh
+make clean package FINALPACKAGE=1 ARCHS=arm64 TARGET=iphone:clang:12.4:12.0
+```
+
+The Debian package version is `1.0.0`, matching the `/status` version reported by the daemon.
+
 Theos does not support project paths containing spaces. If needed, build from a temporary copy or a path without spaces.
+
+## iOS 12 Notes
+
+- iPhone 5s is arm64. iPhone 5 (`iPhone5,1` / `iPhone5,2`) is armv7s and does not officially run iOS 12.
+- `arm64` is the safest default slice for iOS 12 jailbreaks; add `arm64e` only if your Theos SDK/toolchain and target jailbreak need it.
+- If the package installs but the stream does not start, check `/var/mobile/Library/Logs/LegacyCam/legacycamd.err` and the device syslog. iOS 12 camera/privacy behavior is stricter than iOS 7, so runtime verification on the device matters more than the compile result.
+- iOS 12 requires camera permission through a real app bundle and refuses camera capture from a plain background daemon. On iOS 9 and newer, `LegacyCamSpringBoard.dylib` hosts the camera and HTTP server inside SpringBoard through MobileSubstrate; on iOS 7, the launch daemon remains the active host.
+- On jailbreaks with writable TCC, `postinst` pre-authorizes `com.fabiswdevbeg.legacycam` and `com.apple.springboard` for camera access. If app permission fails, open `LegacyCam.app` once, tap `Request Camera Access`, allow camera access, then respring.
+
+Recommended iOS 12 install flow:
+
+```sh
+dpkg -i com.fabiswdevbeg.legacycam_1.0.0_iphoneos-arm_ios12-arm64.deb
+uicache
+killall SpringBoard
+```
+
+If `/status` reports `camera_permission_denied`, open `LegacyCam` from the home screen and allow camera access. After that:
+
+```sh
+killall SpringBoard
+curl http://127.0.0.1:8080/status
+```
+
+## Settings
+
+The package installs a PreferenceLoader panel at:
+
+```text
+Settings -> LegacyCam
+```
+
+The `Camera Enabled` switch defaults to on. Turning it off keeps the HTTP daemon online, stops camera capture, stops idle-sleep prevention, and makes `/stream` return `503 Service Unavailable` until the switch is enabled again.
+
+`/status` includes:
+
+```json
+{
+  "camera_enabled": true,
+  "camera_running": true,
+  "camera_error": ""
+}
+```
 
 ## Service Control
 
 ```sh
 launchctl unload /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist
 launchctl load -w /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist
-tail -f /var/log/legacycamd.log
-tail -f /var/log/legacycamd.err
+tail -f /var/mobile/Library/Logs/LegacyCam/legacycamd.log
+tail -f /var/mobile/Library/Logs/LegacyCam/legacycamd.err
 ```
+
+If the log files are missing, reinstall the package so `postinst` creates `/var/mobile/Library/Logs/LegacyCam`, then reload the launch daemon.
 
 For continuous streaming, keep the phone on power and let the daemon prevent auto-lock. Pressing the power button can still force iOS to suspend camera capture.

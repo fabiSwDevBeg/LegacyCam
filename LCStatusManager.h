@@ -7,6 +7,9 @@
 
 - (void)incrementStreamClients;
 - (void)decrementStreamClients;
-- (NSDictionary *)statusDictionaryWithFlashEnabled:(BOOL)flashEnabled;
+- (NSDictionary *)statusDictionaryWithFlashEnabled:(BOOL)flashEnabled
+                                    cameraEnabled:(BOOL)cameraEnabled
+                                    cameraRunning:(BOOL)cameraRunning
+                                      cameraError:(NSString *)cameraError;
 
 @end

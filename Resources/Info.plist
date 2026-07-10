@@ -53,6 +53,8 @@
 	<string>1.0</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>LegacyCam needs camera access to stream MJPEG video to Home Assistant.</string>
 	<key>UIDeviceFamily</key>
 	<array>
 		<integer>1</integer>

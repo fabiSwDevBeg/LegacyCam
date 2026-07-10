@@ -2,8 +2,33 @@
 
 set -e
 
+LOG_DIR=/var/mobile/Library/Logs/LegacyCam
+TCC_DB=/var/mobile/Library/TCC/TCC.db
+BUNDLE_ID=com.fabiswdevbeg.legacycam
+SPRINGBOARD_ID=com.apple.springboard
+
+mkdir -p "$LOG_DIR"
+chown mobile:mobile "$LOG_DIR" >/dev/null 2>&1 || true
+chmod 755 "$LOG_DIR" >/dev/null 2>&1 || true
+
+grant_camera_tcc() {
+    CLIENT_ID="$1"
+    /usr/bin/sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServiceCamera' AND client='$CLIENT_ID';" >/dev/null 2>&1 || true
+    /usr/bin/sqlite3 "$TCC_DB" "INSERT INTO access (service, client, client_type, allowed, prompt_count, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified) VALUES ('kTCCServiceCamera', '$CLIENT_ID', 0, 1, 1, NULL, NULL, 0, 'UNUSED', NULL, 0, strftime('%s','now'));" >/dev/null 2>&1 || \
+    /usr/bin/sqlite3 "$TCC_DB" "INSERT INTO access (service, client, client_type, allowed, prompt_count, csreq) VALUES ('kTCCServiceCamera', '$CLIENT_ID', 0, 1, 1, NULL);" >/dev/null 2>&1 || \
+    /usr/bin/sqlite3 "$TCC_DB" "INSERT INTO access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified) VALUES ('kTCCServiceCamera', '$CLIENT_ID', 0, 2, 4, 1, NULL, NULL, 0, 'UNUSED', NULL, 0, strftime('%s','now'));" >/dev/null 2>&1 || true
+}
+
+if [ -x /usr/bin/sqlite3 ] && [ -f "$TCC_DB" ]; then
+    grant_camera_tcc "$BUNDLE_ID"
+    grant_camera_tcc "$SPRINGBOARD_ID"
+    killall tccd >/dev/null 2>&1 || true
+fi
+
 if [ -x /bin/launchctl ]; then
     /bin/launchctl unload /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist >/dev/null 2>&1 || true
+    killall legacycamd >/dev/null 2>&1 || true
+    killall LegacyCam >/dev/null 2>&1 || true
     /bin/launchctl load -w /Library/LaunchDaemons/com.fabiswdevbeg.legacycamd.plist >/dev/null 2>&1 || true
 fi
 
