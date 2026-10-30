@@ -1,39 +1,57 @@
 #import "FlashManager.h"
 #import "LCCaptureDevice.h"
+#import "LCLog.h"
 #import <AVFoundation/AVFoundation.h>
 
 @implementation FlashManager
 
 static BOOL flashEnabled = NO;
+static BOOL torchAvailable = NO;
 static NSString *flashError = nil;
+
++ (void)setFlashError:(NSString *)error {
+    @synchronized(self) {
+        flashError = [error copy];
+    }
+}
+
++ (void)setTorchAvailableValue:(BOOL)available {
+    @synchronized(self) {
+        torchAvailable = available;
+    }
+}
 
 + (void)setFlash:(BOOL)on {
 
     AVCaptureDevice *device = [LCCaptureDevice backVideoDevice];
 
     if (!device) {
-        flashError = @"camera_device_unavailable";
-        NSLog(@"[LegacyCam] flash error: no camera device");
+        [self setTorchAvailableValue:NO];
+        [self setFlashError:@"camera_device_unavailable"];
+        LCLog(@"flash request failed: no camera device");
         return;
     }
 
     if (![device hasTorch]) {
-        flashError = @"torch_unavailable";
-        NSLog(@"[LegacyCam] flash error: selected device has no torch (%@)", device.localizedName);
+        [self setTorchAvailableValue:NO];
+        [self setFlashError:@"torch_unavailable"];
+        LCLog(@"flash request failed: selected device has no torch (%@)", device.localizedName);
         return;
     }
 
+    [self setTorchAvailableValue:[device isTorchAvailable]];
+
     if (![device isTorchAvailable]) {
-        flashError = @"torch_not_available_now";
-        NSLog(@"[LegacyCam] flash error: torch not available now (%@)", device.localizedName);
+        [self setFlashError:@"torch_not_available_now"];
+        LCLog(@"flash request failed: torch not available now (%@)", device.localizedName);
         return;
     }
 
     NSError *error = nil;
 
     if (![device lockForConfiguration:&error]) {
-        flashError = [NSString stringWithFormat:@"torch_lock_error:%@", error.localizedDescription ?: @"unknown"];
-        NSLog(@"[LegacyCam] flash lock error: %@", error);
+        [self setFlashError:[NSString stringWithFormat:@"torch_lock_error:%@", error.localizedDescription ?: @"unknown"]];
+        LCLog(@"flash configuration lock failed: %@", error);
         return;
     }
 
@@ -43,23 +61,36 @@ static NSString *flashError = nil;
         [device setTorchMode:AVCaptureTorchModeOff];
     }
 
-    flashEnabled = on;
-    flashError = nil;
+    @synchronized(self) {
+        flashEnabled = on;
+        flashError = nil;
+    }
 
     [device unlockForConfiguration];
+    LCLog(@"flash set to %@", on ? @"on" : @"off");
 }
 
 + (BOOL)isFlashEnabled {
-    return flashEnabled;
+    @synchronized(self) {
+        return flashEnabled;
+    }
 }
 
 + (BOOL)isTorchAvailable {
-    AVCaptureDevice *device = [LCCaptureDevice backVideoDevice];
-    return device && [device hasTorch] && [device isTorchAvailable];
+    @synchronized(self) {
+        return torchAvailable;
+    }
 }
 
 + (NSString *)lastError {
-    return flashError;
+    @synchronized(self) {
+        return flashError;
+    }
+}
+
++ (void)refreshTorchAvailability {
+    AVCaptureDevice *device = [LCCaptureDevice backVideoDevice];
+    [self setTorchAvailableValue:device && [device hasTorch] && [device isTorchAvailable]];
 }
 
 @end

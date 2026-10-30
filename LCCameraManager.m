@@ -1,9 +1,11 @@
 #import "LCCameraManager.h"
 #import "LCCaptureDevice.h"
 #import "LCConfigManager.h"
+#import "LCLog.h"
 #import <UIKit/UIKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
+#import <objc/message.h>
 
 @interface LCCameraManager ()
 @property (atomic, copy, readwrite) NSString *lastError;
@@ -16,6 +18,7 @@
     dispatch_queue_t sessionOutputQueue;
     CIContext *context;
     NSTimeInterval lastFrameTime;
+    NSTimeInterval sessionStartTime;
     NSString *_lastError;
 }
 
@@ -26,31 +29,42 @@
         }
     }
 
+    // Check for camera authorization (iOS 7+)
     if ([AVCaptureDevice respondsToSelector:@selector(authorizationStatusForMediaType:)]) {
-        AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+        NSInteger (*authorizationStatus)(id, SEL, NSString *) = (void *)objc_msgSend;
+        NSInteger status = authorizationStatus([AVCaptureDevice class],
+                                               @selector(authorizationStatusForMediaType:),
+                                               AVMediaTypeVideo);
 
-        if (status == AVAuthorizationStatusDenied || status == AVAuthorizationStatusRestricted) {
+        // Check for denied (1) or restricted (2)
+        if (status == 1 || status == 2) {
             [self setLastError:@"camera_permission_denied"];
-            NSLog(@"[LegacyCam] camera permission denied or restricted");
+            LCLog(@"camera permission denied or restricted");
             return;
         }
 
-        if (status == AVAuthorizationStatusNotDetermined) {
+        // Check for not determined (0)
+        if (status == 0) {
             [self setLastError:@"camera_permission_not_determined"];
-            NSLog(@"[LegacyCam] requesting camera permission");
+            LCLog(@"requesting camera permission");
 
-            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
+            void (*requestAccess)(id, SEL, NSString *, void (^)(BOOL)) = (void *)objc_msgSend;
+            requestAccess([AVCaptureDevice class],
+                          @selector(requestAccessForMediaType:completionHandler:),
+                          AVMediaTypeVideo,
+                          ^(BOOL granted) {
                 if (granted) {
-                    NSLog(@"[LegacyCam] camera permission granted");
+                    LCLog(@"camera permission granted");
                     [self start];
                 } else {
                     [self setLastError:@"camera_permission_denied"];
-                    NSLog(@"[LegacyCam] camera permission denied after request");
+                    LCLog(@"camera permission denied after request");
                 }
-            }];
+            });
             return;
         }
     }
+    // iOS 6 doesn't have camera authorization, proceed directly
 
     [self tearDownSessionKeepingError:NO];
 
@@ -67,11 +81,11 @@
 
     if (!device) {
         [self setLastError:@"camera_device_unavailable"];
-        NSLog(@"[LegacyCam] camera device unavailable");
+        LCLog(@"camera device unavailable");
         return;
     }
 
-    NSLog(@"[LegacyCam] selected camera device: %@ position=%ld", device.localizedName, (long)device.position);
+    LCLog(@"selected camera device: %@ position=%ld", device.localizedName, (long)device.position);
 
     NSError *error = nil;
 
@@ -79,13 +93,13 @@
 
     if (!input || error) {
         [self setLastError:[NSString stringWithFormat:@"camera_input_error:%@", error.localizedDescription ?: @"unknown"]];
-        NSLog(@"[LegacyCam] camera input error: %@", error);
+        LCLog(@"camera input error: %@", error);
         return;
     }
 
     if (![newSession canAddInput:input]) {
         [self setLastError:@"cannot_add_camera_input"];
-        NSLog(@"[LegacyCam] cannot add camera input");
+        LCLog(@"cannot add camera input");
         return;
     }
 
@@ -106,7 +120,7 @@
     if (![newSession canAddOutput:output]) {
         [newSession commitConfiguration];
         [self setLastError:@"cannot_add_camera_output"];
-        NSLog(@"[LegacyCam] cannot add camera output");
+        LCLog(@"cannot add camera output");
         return;
     }
 
@@ -119,6 +133,7 @@
         sessionOutput = output;
         sessionOutputQueue = q;
         lastFrameTime = 0;
+        sessionStartTime = CFAbsoluteTimeGetCurrent();
     }
 
     [self registerForSessionNotifications:newSession];
@@ -128,9 +143,9 @@
         if (!self.lastError) {
             [self setLastError:@"camera_session_not_running"];
         }
-        NSLog(@"[LegacyCam] camera session did not start running");
+        LCLog(@"camera session did not start running");
     } else {
-        NSLog(@"[LegacyCam] camera session started");
+        LCLog(@"camera session started");
     }
 }
 
@@ -155,6 +170,7 @@
         sessionOutput = nil;
         sessionOutputQueue = nil;
         lastFrameTime = 0;
+        sessionStartTime = 0;
 
         if (!keepError) {
             [self setLastError:nil];
@@ -170,6 +186,21 @@
 - (BOOL)isRunning {
     @synchronized (self) {
         return session && session.isRunning;
+    }
+}
+
+- (BOOL)producingFrames {
+    @synchronized (self) {
+        if (!session || !session.isRunning) {
+            return NO;
+        }
+
+        NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+        if (lastFrameTime > 0) {
+            return now - lastFrameTime < 10.0;
+        }
+
+        return sessionStartTime > 0 && now - sessionStartTime < 15.0;
     }
 }
 
@@ -217,7 +248,7 @@
         }
     }
 
-    NSLog(@"[LegacyCam] camera session did start running");
+    LCLog(@"camera session did start running");
 }
 
 - (void)sessionDidStopRunning:(NSNotification *)notification {
@@ -227,7 +258,7 @@
         }
     }
 
-    NSLog(@"[LegacyCam] camera session did stop running");
+    LCLog(@"camera session did stop running");
 }
 
 - (void)sessionRuntimeError:(NSNotification *)notification {
@@ -244,7 +275,7 @@
     }
 
     [self setLastError:message];
-    NSLog(@"[LegacyCam] camera runtime error: %@", error);
+    LCLog(@"camera runtime error: %@", error);
 }
 
 - (void)sessionWasInterrupted:(NSNotification *)notification {
@@ -277,7 +308,7 @@
         }
     }
 
-    NSLog(@"[LegacyCam] camera session was interrupted: %@", notification.userInfo);
+    LCLog(@"camera session was interrupted: %@", notification.userInfo);
 }
 
 - (void)sessionInterruptionEnded:(NSNotification *)notification {
@@ -287,7 +318,7 @@
         }
     }
 
-    NSLog(@"[LegacyCam] camera session interruption ended");
+    LCLog(@"camera session interruption ended");
 }
 
 - (void)captureOutput:(AVCaptureOutput *)output
@@ -296,16 +327,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSTimeInterval now = CFAbsoluteTimeGetCurrent();
     NSTimeInterval frameInterval = [LCConfigManager sharedManager].frameIntervalUsec / 1000000.0;
 
-    if (lastFrameTime > 0 && now - lastFrameTime < frameInterval) {
-        return;
+    @synchronized (self) {
+        if (lastFrameTime > 0 && now - lastFrameTime < frameInterval) {
+            return;
+        }
     }
 
     lastFrameTime = now;
 
     CVImageBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
 
-    // 🔥 LOCK MINIMO
-    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+    if (!pixelBuffer || CVPixelBufferLockBaseAddress(pixelBuffer, 0) != kCVReturnSuccess) {
+        return;
+    }
 
     size_t width = CVPixelBufferGetWidth(pixelBuffer);
     size_t height = CVPixelBufferGetHeight(pixelBuffer);
@@ -313,6 +347,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     void *base = CVPixelBufferGetBaseAddress(pixelBuffer);
 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+
+    if (!base || !colorSpace) {
+        if (colorSpace) {
+            CGColorSpaceRelease(colorSpace);
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        return;
+    }
 
     CGContextRef contextRef =
         CGBitmapContextCreate(base,
@@ -323,7 +365,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                               colorSpace,
                               kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);
 
+    if (!contextRef) {
+        CGColorSpaceRelease(colorSpace);
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        return;
+    }
+
     CGImageRef cgImage = CGBitmapContextCreateImage(contextRef);
+
+    if (!cgImage) {
+        CGContextRelease(contextRef);
+        CGColorSpaceRelease(colorSpace);
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        return;
+    }
 
     UIImage *img = [UIImage imageWithCGImage:cgImage];
     NSData *jpg = UIImageJPEGRepresentation(img, [LCConfigManager sharedManager].streamQuality);
@@ -337,6 +392,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (jpg) {
         self.latestJPEG = jpg;
         self.latestJPEGSequence = self.latestJPEGSequence + 1;
+
+        @synchronized (self) {
+            lastFrameTime = now;
+        }
     }
 }
 

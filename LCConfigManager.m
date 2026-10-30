@@ -21,14 +21,14 @@
         _port = 8080;
         _deviceName = [self detectedDeviceName];
         _version = @"1.0.0";
-        _build = @"ios7-4clients-20260619";
+        _build = @"single-stream-watchdog-20261030";
+
+        _maxStreamClients = 1;
 
         if ([_deviceName hasPrefix:@"iPhone3,"]) {
-            _maxStreamClients = 4;
             _streamQuality = 0.16;
             _frameIntervalUsec = 200000;
         } else {
-            _maxStreamClients = 3;
             _streamQuality = 0.22;
             _frameIntervalUsec = 66667;
         }

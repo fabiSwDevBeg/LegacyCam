@@ -6,5 +6,6 @@
 + (BOOL)isFlashEnabled;
 + (BOOL)isTorchAvailable;
 + (NSString *)lastError;
++ (void)refreshTorchAvailability;
 
 @end

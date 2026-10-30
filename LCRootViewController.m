@@ -1,5 +1,7 @@
 #import "LCRootViewController.h"
 #import <AVFoundation/AVFoundation.h>
+#import <objc/message.h>
+#import "LCLog.h"
 
 @implementation LCRootViewController
 
@@ -24,7 +26,7 @@
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) {
-        return @"Open this app once on iOS 12 and allow camera access, then reload the LegacyCam daemon.";
+        return @"Grant camera access here. The permission remains granted when the screen locks; camera capture runs in the LegacyCam background service.";
     }
 
     return @"The MJPEG HTTP server is managed by launchd in the background.";
@@ -42,7 +44,7 @@
 
     if (indexPath.section == 0 && indexPath.row == 1) {
         cell.textLabel.text = @"Request Camera Access";
-        cell.textLabel.textColor = self.view.tintColor;
+        cell.textLabel.textColor = [UIColor blueColor];
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         return cell;
     }
@@ -56,11 +58,18 @@
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
     if (indexPath.section == 0 && indexPath.row == 1) {
-        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self.tableView reloadData];
+        if ([AVCaptureDevice respondsToSelector:@selector(requestAccessForMediaType:completionHandler:)]) {
+            void (*requestAccess)(id, SEL, NSString *, void (^)(BOOL)) = (void *)objc_msgSend;
+            requestAccess([AVCaptureDevice class],
+                          @selector(requestAccessForMediaType:completionHandler:),
+                          AVMediaTypeVideo,
+                          ^(BOOL granted) {
+                LCLog(@"camera permission request from app completed: %@", granted ? @"granted" : @"denied");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self.tableView reloadData];
+                });
             });
-        }];
+        }
     }
 }
 
@@ -69,16 +78,19 @@
         return @"Not required";
     }
 
-    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+    NSInteger (*authorizationStatus)(id, SEL, NSString *) = (void *)objc_msgSend;
+    NSInteger status = authorizationStatus([AVCaptureDevice class],
+                                           @selector(authorizationStatusForMediaType:),
+                                           AVMediaTypeVideo);
 
     switch (status) {
-        case AVAuthorizationStatusAuthorized:
+        case 3: // AVAuthorizationStatusAuthorized
             return @"Authorized";
-        case AVAuthorizationStatusDenied:
+        case 1: // AVAuthorizationStatusDenied
             return @"Denied";
-        case AVAuthorizationStatusRestricted:
+        case 2: // AVAuthorizationStatusRestricted
             return @"Restricted";
-        case AVAuthorizationStatusNotDetermined:
+        case 0: // AVAuthorizationStatusNotDetermined
             return @"Not Determined";
     }
 

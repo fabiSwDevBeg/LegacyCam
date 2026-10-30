@@ -6,12 +6,15 @@
 #import "LCStatusManager.h"
 #import "LCPowerManager.h"
 #import "LCPreferences.h"
+#import "LCLog.h"
 
 static BOOL LegacyCamShouldExit = NO;
 static LCCameraManager *LegacyCamCamera = nil;
 static LCPowerManager *LegacyCamPowerManager = nil;
 static NSTimer *LegacyCamCameraRetryTimer = nil;
 static id LegacyCamCameraRetryTarget = nil;
+static dispatch_queue_t LegacyCamCameraQueue = nil;
+static BOOL LegacyCamCameraStartPending = NO;
 
 static void LegacyCamApplyPreferences(void);
 static void LegacyCamEnsureCameraRunning(void);
@@ -60,10 +63,10 @@ static void LegacyCamScheduleCameraRetry(void) {
                                                                 repeats:YES];
 
     if ([LegacyCamCameraRetryTimer respondsToSelector:@selector(setTolerance:)]) {
-        LegacyCamCameraRetryTimer.tolerance = 1.0;
+        [LegacyCamCameraRetryTimer performSelector:@selector(setTolerance:) withObject:@1.0];
     }
 
-    NSLog(@"[LegacyCam] camera retry scheduled");
+    LCLog(@"camera retry/frame watchdog scheduled");
 }
 
 static void LegacyCamEnsureCameraRunning(void) {
@@ -72,32 +75,53 @@ static void LegacyCamEnsureCameraRunning(void) {
         return;
     }
 
-    if (LegacyCamCamera.isRunning) {
-        LegacyCamInvalidateCameraRetry();
+    if (LegacyCamCamera.producingFrames) {
         return;
     }
 
-    [LegacyCamPowerManager startPreventingIdleSleep];
-    [LegacyCamCamera start];
-
-    if (LegacyCamCamera.isRunning) {
-        LegacyCamInvalidateCameraRetry();
-        NSLog(@"[LegacyCam] camera running");
-    } else {
-        LegacyCamScheduleCameraRetry();
-        NSLog(@"[LegacyCam] camera start pending: %@", LegacyCamCamera.lastError ?: @"unknown");
+    if (LegacyCamCameraStartPending) {
+        return;
     }
+
+    LegacyCamCameraStartPending = YES;
+    dispatch_async(LegacyCamCameraQueue, ^{
+        if (LegacyCamCamera.isRunning) {
+            LCLog(@"frame watchdog restarting stale camera session");
+            [LegacyCamCamera stop];
+        }
+
+        [LegacyCamPowerManager startPreventingIdleSleep];
+        [LegacyCamCamera start];
+        BOOL cameraRunning = LegacyCamCamera.isRunning;
+        NSString *cameraError = [LegacyCamCamera.lastError copy];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LegacyCamCameraStartPending = NO;
+
+            if (![LCPreferences isCameraEnabled]) {
+                LegacyCamEnsureCameraRunning();
+            } else if (cameraRunning) {
+                LCLog(@"camera session started; frame watchdog active");
+                LegacyCamScheduleCameraRetry();
+            } else {
+                LCLog(@"camera start pending or failed: %@", cameraError ?: @"unknown");
+                LegacyCamScheduleCameraRetry();
+            }
+        });
+    });
 }
 
 static void LegacyCamApplyPreferences(void) {
     if ([LCPreferences isCameraEnabled]) {
-        NSLog(@"[LegacyCam] camera enabled");
+        LCLog(@"camera enabled in preferences");
         LegacyCamEnsureCameraRunning();
     } else {
         LegacyCamInvalidateCameraRetry();
-        [LegacyCamCamera stop];
-        [LegacyCamPowerManager stopPreventingIdleSleep];
-        NSLog(@"[LegacyCam] camera disabled");
+        dispatch_async(LegacyCamCameraQueue, ^{
+            [LegacyCamCamera stop];
+            [LegacyCamPowerManager stopPreventingIdleSleep];
+        });
+        LCLog(@"camera disabled in preferences");
     }
 }
 
@@ -119,7 +143,7 @@ int LegacyCamDaemonMain(int argc, char *argv[]) {
         signal(SIGPIPE, SIG_IGN);
 
         if (LegacyCamUsesSpringBoardHost()) {
-            NSLog(@"[LegacyCam] daemon idle: camera and HTTP server are hosted in SpringBoard on this iOS version");
+            LCLog(@"daemon idle: camera and HTTP server are hosted in SpringBoard on this iOS version");
 
             while (!LegacyCamShouldExit) {
                 @autoreleasepool {
@@ -135,14 +159,7 @@ int LegacyCamDaemonMain(int argc, char *argv[]) {
 
         LCCameraManager *camera = [[LCCameraManager alloc] init];
         LegacyCamCamera = camera;
-        LegacyCamApplyPreferences();
-
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                        NULL,
-                                        LegacyCamPreferencesChanged,
-                                        (__bridge CFStringRef)LCPrefsChangedNotification,
-                                        NULL,
-                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+        LegacyCamCameraQueue = dispatch_queue_create("com.fabiswdevbeg.legacycam.session", DISPATCH_QUEUE_SERIAL);
 
         LCStatusManager *statusManager = [[LCStatusManager alloc] init];
 
@@ -151,7 +168,16 @@ int LegacyCamDaemonMain(int argc, char *argv[]) {
         server.statusManager = statusManager;
         [server start];
 
-        NSLog(@"[LegacyCam] daemon ready");
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        NULL,
+                                        LegacyCamPreferencesChanged,
+                                        (__bridge CFStringRef)LCPrefsChangedNotification,
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+
+                LegacyCamApplyPreferences();
+
+                LCLog(@"daemon ready; HTTP server started before camera initialization");
 
         while (!LegacyCamShouldExit) {
             @autoreleasepool {
@@ -159,7 +185,7 @@ int LegacyCamDaemonMain(int argc, char *argv[]) {
             }
         }
 
-        NSLog(@"[LegacyCam] daemon stopping");
+        LCLog(@"daemon stopping");
         LegacyCamInvalidateCameraRetry();
         CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                            NULL,

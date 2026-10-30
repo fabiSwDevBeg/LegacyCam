@@ -4,14 +4,32 @@
 #import "LCPreferences.h"
 #import "LCRoutes.h"
 #import "LCStatusManager.h"
+#import "LCLog.h"
 #import <sys/socket.h>
 #import <sys/time.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
 #import <unistd.h>
+#import <errno.h>
+#import <string.h>
 
 @implementation HTTPServer {
     int server_fd;
+    int activeStreamClient;
+    NSLock *streamLock;
+    dispatch_queue_t flashQueue;
+}
+
+- (instancetype)init {
+    self = [super init];
+
+    if (self) {
+        activeStreamClient = -1;
+        streamLock = [[NSLock alloc] init];
+        flashQueue = dispatch_queue_create("com.fabiswdevbeg.legacycam.flash", DISPATCH_QUEUE_SERIAL);
+    }
+
+    return self;
 }
 
 - (void)start {
@@ -20,8 +38,17 @@
     if (!self.statusManager) {
         self.statusManager = [[LCStatusManager alloc] init];
     }
+
+    dispatch_async(flashQueue, ^{
+        [FlashManager refreshTorchAvailability];
+        LCLog(@"initial torch availability: %@", [FlashManager isTorchAvailable] ? @"available" : @"unavailable");
+    });
     
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        LCLog(@"HTTP socket creation failed: %s", strerror(errno));
+        return;
+    }
 
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -31,8 +58,21 @@
     addr.sin_port = htons([LCConfigManager sharedManager].port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
-    listen(server_fd, 16);
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        LCLog(@"HTTP bind on port %u failed: %s", ntohs(addr.sin_port), strerror(errno));
+        close(server_fd);
+        server_fd = -1;
+        return;
+    }
+
+    if (listen(server_fd, 16) < 0) {
+        LCLog(@"HTTP listen failed: %s", strerror(errno));
+        close(server_fd);
+        server_fd = -1;
+        return;
+    }
+
+    LCLog(@"HTTP server listening on port %u", ntohs(addr.sin_port));
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         [self loop];
@@ -60,6 +100,7 @@
         int len = read(client, buffer, sizeof(buffer)-1);
 
         if (len <= 0) {
+            LCLog(@"HTTP request read failed: result=%d errno=%d", len, errno);
             close(client);
             return;
         }
@@ -68,6 +109,7 @@
                                                       length:len
                                                     encoding:NSUTF8StringEncoding];
         NSString *path = [self pathForRequest:request];
+        LCLog(@"HTTP request %@", path);
 
         if ([path isEqualToString:LCRoutePing]) {
             [self sendJSON:@{@"ok": @YES} client:client];
@@ -89,33 +131,26 @@
         }
 
         if ([path isEqualToString:LCRouteFlashOn]) {
-            [FlashManager setFlash:YES];
-            [self sendJSON:@{
-                @"enabled": @([FlashManager isFlashEnabled]),
-                @"available": @([FlashManager isTorchAvailable]),
-                @"error": [FlashManager lastError] ?: @""
-            } client:client];
+            dispatch_async(flashQueue, ^{
+                [FlashManager setFlash:YES];
+            });
+            [self sendFlashAccepted:YES client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteFlashOff]) {
-            [FlashManager setFlash:NO];
-            [self sendJSON:@{
-                @"enabled": @([FlashManager isFlashEnabled]),
-                @"available": @([FlashManager isTorchAvailable]),
-                @"error": [FlashManager lastError] ?: @""
-            } client:client];
+            dispatch_async(flashQueue, ^{
+                [FlashManager setFlash:NO];
+            });
+            [self sendFlashAccepted:NO client:client];
             return;
         }
 
         if ([path isEqualToString:LCRouteStream]) {
-            if (![LCPreferences isCameraEnabled] || !self.camera.isRunning) {
+            if (![LCPreferences isCameraEnabled] || !self.camera.isRunning || !self.camera.producingFrames) {
+                LCLog(@"stream rejected: enabled=%d running=%d producing_frames=%d",
+                      [LCPreferences isCameraEnabled], self.camera.isRunning, self.camera.producingFrames);
                 [self sendUnavailable:client];
-                return;
-            }
-
-            if (self.statusManager.streamClients >= [LCConfigManager sharedManager].maxStreamClients) {
-                [self sendTooManyStreams:client];
                 return;
             }
 
@@ -137,6 +172,7 @@
     payload[@"flash_error"] = [FlashManager lastError] ?: @"";
     payload[@"frame_sequence"] = @(self.camera.latestJPEGSequence);
     payload[@"latest_jpeg_bytes"] = @(self.camera.latestJPEG.length);
+    payload[@"camera_producing_frames"] = @(self.camera.producingFrames);
     payload[@"max_stream_clients"] = @([LCConfigManager sharedManager].maxStreamClients);
 
     return payload;
@@ -157,20 +193,40 @@
 - (void)sendMJPEG:(int)client {
     [self configureClientSocket:client forStream:YES];
 
+    [streamLock lock];
+    int previousClient = activeStreamClient;
+    activeStreamClient = client;
+
+    if (previousClient < 0) {
+        [self.statusManager incrementStreamClients];
+    }
+
+    [streamLock unlock];
+
+    if (previousClient >= 0) {
+        LCLog(@"new stream client replaced the previous client");
+        shutdown(previousClient, SHUT_RDWR);
+    }
+
+    LCLog(@"MJPEG stream connected");
+
     NSString *header =
     @"HTTP/1.1 200 OK\r\n"
     "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
 
-    if (![self writeString:header client:client]) {
-        close(client);
+    if (![self writeStreamString:header client:client]) {
+        [self finishStreamClient:client];
         return;
     }
 
-    [self.statusManager incrementStreamClients];
     NSUInteger lastSequence = 0;
 
     while (1) {
         @autoreleasepool {
+            if (![self isActiveStreamClient:client]) {
+                break;
+            }
+
             NSData *jpg = self.camera.latestJPEG;
             NSUInteger sequence = self.camera.latestJPEGSequence;
 
@@ -183,17 +239,49 @@
                 @"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
                 (unsigned long)jpg.length];
 
-            if (![self writeString:meta client:client] ||
-                ![self writeData:jpg client:client] ||
-                ![self writeString:@"\r\n" client:client]) {
-                close(client);
-                [self.statusManager decrementStreamClients];
+            if (![self writeStreamString:meta client:client] ||
+                ![self writeStreamData:jpg client:client] ||
+                ![self writeStreamString:@"\r\n" client:client]) {
+                [self finishStreamClient:client];
+                LCLog(@"MJPEG stream write failed");
                 break;
             }
 
             lastSequence = sequence;
         }
     }
+}
+
+- (BOOL)isActiveStreamClient:(int)client {
+    [streamLock lock];
+    BOOL isActive = activeStreamClient == client;
+    [streamLock unlock];
+    return isActive;
+}
+
+- (BOOL)writeStreamString:(NSString *)string client:(int)client {
+    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    return [self writeStreamData:data client:client];
+}
+
+- (BOOL)writeStreamData:(NSData *)data client:(int)client {
+    [streamLock lock];
+    BOOL isActive = activeStreamClient == client;
+    [streamLock unlock];
+
+    return isActive && [self writeData:data client:client];
+}
+
+- (void)finishStreamClient:(int)client {
+    [streamLock lock];
+
+    if (activeStreamClient == client) {
+        activeStreamClient = -1;
+        [self.statusManager decrementStreamClients];
+    }
+
+    close(client);
+    [streamLock unlock];
 }
 
 - (void)configureClientSocket:(int)client forStream:(BOOL)stream {
@@ -257,6 +345,24 @@
     close(client);
 }
 
+- (void)sendFlashAccepted:(BOOL)enabled client:(int)client {
+    NSDictionary *payload = @{
+        @"accepted": @YES,
+        @"requested_enabled": @(enabled),
+        @"enabled": @([FlashManager isFlashEnabled]),
+        @"available": @([FlashManager isTorchAvailable]),
+        @"error": [FlashManager lastError] ?: @""
+    };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+    NSString *header = [NSString stringWithFormat:
+        @"HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
+        (unsigned long)body.length];
+
+    [self writeString:header client:client];
+    [self writeData:body client:client];
+    close(client);
+}
+
 - (void)sendUnavailable:(int)client {
     NSDictionary *payload = [self statusPayload];
     NSError *error = nil;
@@ -268,27 +374,6 @@
 
     NSString *header = [NSString stringWithFormat:
         @"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
-        (unsigned long)body.length];
-
-    write(client, header.UTF8String, header.length);
-    write(client, body.bytes, body.length);
-    close(client);
-}
-
-- (void)sendTooManyStreams:(int)client {
-    NSMutableDictionary *payload = [[self statusPayload] mutableCopy];
-    payload[@"error"] = @"too_many_stream_clients";
-    payload[@"max_stream_clients"] = @([LCConfigManager sharedManager].maxStreamClients);
-
-    NSError *error = nil;
-    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&error];
-
-    if (!body || error) {
-        body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-    }
-
-    NSString *header = [NSString stringWithFormat:
-        @"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: %lu\r\n\r\n",
         (unsigned long)body.length];
 
     write(client, header.UTF8String, header.length);
